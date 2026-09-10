@@ -143,10 +143,11 @@ class PokemonCardDownloader:
 
     # --- CSV Population Logic ---
 
-    def _populate_sets_csv(self):
+    def _populate_sets_csv(self) -> None:
         """Updates the sets CSV with all available sets from the JSON data."""
         print(f"[{datetime.now().strftime('%H:%M:%S')}] INFO: Updating {DOWNLOADED_SETS_CSV}...")
         new_entries = 0
+        updated_entries = 0
         current_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
         for set_id, api_set in self.api_sets_data.items():
@@ -168,13 +169,18 @@ class PokemonCardDownloader:
             else:
                 # Existing set: update relevant metadata fields
                 existing_row = self.downloaded_sets_data[set_id]
-                existing_row['set_name'] = api_set['name']
-                existing_row['printed_total'] = printed_total_str
-                existing_row['last_updated'] = api_set.get('updatedAt', existing_row['last_updated'])
-                existing_row['last_checked'] = current_time_str
+                metadata = {
+                    'set_name': api_set['name'],
+                    'printed_total': printed_total_str,
+                    'last_updated': api_set.get('updatedAt', existing_row['last_updated']),
+                    'last_checked': current_time_str,
+                }
+                if any(existing_row.get(key) != value for key, value in metadata.items()):
+                    existing_row.update(metadata)
+                    updated_entries += 1
 
-        if new_entries > 0 or not os.path.exists(DOWNLOADED_SETS_CSV):
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] INFO: Appended {new_entries} new sets/updated existing metadata.")
+        if new_entries > 0 or updated_entries > 0 or not os.path.exists(DOWNLOADED_SETS_CSV):
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] INFO: Added {new_entries} sets; updated metadata for {updated_entries} existing sets.")
             self._save_csv_data(DOWNLOADED_SETS_CSV, SETS_HEADERS, self.downloaded_sets_data)
         else:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] INFO: No new sets found or metadata changes.")
