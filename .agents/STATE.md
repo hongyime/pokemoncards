@@ -1,19 +1,31 @@
 # Agent State
 
-Portfolio maintenance, 2026-09-11: PR #26 merged as
-`f541bcd1e171c816000b09ccbaf42ccd39998a6d`. Existing-set metadata now persists
-when a refresh discovers no new sets. The original source failed five of twelve
-isolated tests; all twelve now pass locally and on Linux/Windows in PR and main
-CI. Main run `34534253252` and all five source/security workflows passed.
-The fix uses the existing atomic CSV writer and preserves download progress,
-unlisted sets and unchanged checkpoints. Existing CSV/JSON collection files
-remain byte-identical.
+Portfolio maintenance, 2026-09-12: download recovery repair is ready for hosted
+review. Baseline fixtures reproduced 13 unsafe behaviors. The revised suite has
+38 cases: 37 pass locally on Windows and one symbolic-link case is skipped because
+the host does not grant link creation. Hosted Linux must cover that case.
 
-Remaining review: fail closed on partial checkpoint reads, make interrupted
-image writes recoverable, bound download failures/queueing and validate paths.
-These are separate from the completed metadata fix.
+Changes: strict complete CSV reads preserve unknown columns and fail closed on
+invalid checkpoints; image writes use temporary-file replacement and retain prior
+files on failure; PNG boundaries and available sizes are checked; missing images
+are requeued and existing images can repair lost progress. Paths and colliding
+destinations are checked before writes. Outstanding tasks are bounded by worker
+count, new submissions stop after three failed cards, and HTTP 429 stops the run.
+Worker copies are merged only after completion. Checkpoints save changed records
+in batches and drain completed work on interruption without clobbering failed
+checkpoints. Runs with unfinished images no longer report complete success.
 
-This repository is a local Python downloader with CSV/JSON checkpoints and image
-files. It has no mapped Supabase/Vercel runtime. Tests must use synthetic temporary
-files and block network access; do not run the downloader against an existing
-collection as a maintenance test. Existing collection data must be preserved.
+Next: all hosted source/security checks must pass before normal PR merge; verify
+exact main source/checks, preserve original collection hashes during local sync,
+and update the shared Markdown/PostPlan report. Existing workflows and pinned
+dependencies remain unchanged; legacy bot merge workflows stay paused.
+
+Previous metadata fix PR #26 remains covered by twelve restart/preservation tests.
+The new tests use synthetic temporary files, fake responses and blocked network.
+No existing collection file is read by tests and no provider download is invoked.
+
+This is a local Python CLI with CSV/JSON checkpoints and image files. There is no
+mapped Supabase or Vercel runtime. PNG checks do not decode pixels or prove provider
+identity, and independent downloader processes do not share a transaction/lock.
+Cache atomicity, launcher behavior and provider catalog completeness still need
+review. The wider portfolio and Supabase capacity/migration work remain open.
