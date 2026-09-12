@@ -4,7 +4,9 @@ import csv
 import requests
 import time
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from pathlib import Path, PureWindowsPath
+import tempfile
 from typing import List, Dict, Any, Optional, Tuple
 import sys
 
@@ -15,7 +17,9 @@ SETS_CACHE_FILE = "sets_cache.json"
 DOWNLOADED_SETS_CSV = "downloaded_sets.csv"
 DOWNLOADED_CARDS_CSV = "downloaded_cards.csv"
 MAX_RETRIES = 0 # Can be 0 for no retries
-MAX_WORKERS = 10 # Number of parallel download threads
+MAX_WORKERS = 10 # Maximum running or queued image requests
+MAX_FAILED_CARDS = 3
+CHECKPOINT_BATCH_SIZE = 50
 
 # --- CSV Headers Definition (Ensuring backward compatibility) ---
 SETS_HEADERS = [
@@ -27,6 +31,10 @@ CARDS_HEADERS = [
     'image_url', 'is_hires', 'file_size', 'download_duration', 'status'
 ]
 
+class CheckpointError(ValueError):
+    """Existing checkpoint data must be repaired before writes can resume."""
+
+
 class PokemonCardDownloader:
     """
     A professional, resilient, and parallelized utility for downloading Pokémon card images
@@ -34,64 +42,80 @@ class PokemonCardDownloader:
     """
     def __init__(self):
         """Initializes the downloader and establishes the initial state."""
+        self.stop_script = False
+        self._checkpoint_write_failed = False
         self.image_dir: Optional[str] = None
         self.downloaded_sets_data: Dict[str, Dict[str, Any]] = self._load_csv_data(DOWNLOADED_SETS_CSV, 'set_id')
         self.downloaded_cards_data: Dict[Tuple[str, str], Dict[str, Any]] = self._load_csv_data(DOWNLOADED_CARDS_CSV, ('set_id', 'card_number'))
         self.api_sets_data: Dict[str, Dict[str, Any]] = {}
-        self.stop_script = False
 
     def _load_csv_data(self, filename: str, key_field: Any) -> Dict:
-        """Loads data from a CSV file into a dictionary for quick lookup."""
-        data = {}
+        """Read an entire valid checkpoint, preserving additional columns."""
         if not os.path.exists(filename):
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] INFO: {filename} not found. Will be created upon processing.")
-            return data
-
+            return {}
+        fields = (key_field,) if isinstance(key_field, str) else key_field
+        data = {}
         try:
-            with open(filename, mode='r', newline='', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                # Ensure headers match the expected keys for backward compatibility
-                expected_keys = set(SETS_HEADERS) if filename == DOWNLOADED_SETS_CSV else set(CARDS_HEADERS)
-                
+            with open(filename, newline='', encoding='utf-8-sig') as stream:
+                reader = csv.DictReader(stream, strict=True)
+                headers = reader.fieldnames
+                if not headers or any(not h for h in headers) or len(set(headers)) != len(headers):
+                    raise ValueError('Missing or duplicate column names')
+                required = SETS_HEADERS if filename == DOWNLOADED_SETS_CSV else CARDS_HEADERS
+                if not set(required).issubset(headers):
+                    raise ValueError('Missing required checkpoint columns')
                 for row in reader:
-                    # Filter out any unexpected columns to maintain compatibility
-                    row = {k: v for k, v in row.items() if k in expected_keys}
-                    
-                    if isinstance(key_field, str):
-                        key = row[key_field]
-                    elif isinstance(key_field, tuple):
-                        # Use tuple key for set_id and card_number
-                        key = tuple(row.get(field) for field in key_field) 
+                    if None in row or any(value is None for value in row.values()):
+                        raise ValueError('Incomplete or extra CSV fields')
+                    if any(not row[field].strip() for field in fields):
+                        raise ValueError('Empty record key')
+                    key = row[key_field] if isinstance(key_field, str) else tuple(row[f] for f in fields)
+                    if key in data:
+                        raise ValueError('Duplicate record key')
                     data[key] = row
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] INFO: Loaded {len(data)} records from {filename}.")
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: Failed to load {filename}. Data might be corrupted. {e}")
-        return data
+            return data
+        except (OSError, UnicodeError, csv.Error, ValueError) as error:
+            self.stop_script = True
+            raise CheckpointError(f'Cannot safely read {filename}; original file was preserved: {error}') from error
 
-    def _save_csv_data(self, filename: str, headers: List[str], data: Dict):
+    def _save_csv_data(self, filename: str, headers: List[str], data: Dict) -> bool:
         """Writes the current dictionary data back to a CSV file (atomic write for resilience)."""
+        if self._checkpoint_write_failed:
+            return False
         if not data:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] WARNING: Skipping save for {filename}. Data dictionary is empty.")
-            return
+            return True
 
-        temp_filename = filename + '.tmp'
+        extra_headers = dict.fromkeys(key for row in data.values() for key in row if key not in headers)
+        output_headers = list(headers) + list(extra_headers)
+        temp_filename = None
         try:
-            with open(temp_filename, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=headers)
+            with tempfile.NamedTemporaryFile(mode='w', newline='', encoding='utf-8',
+                                             dir=os.path.dirname(os.path.abspath(filename)),
+                                             prefix='.' + os.path.basename(filename) + '.', suffix='.tmp',
+                                             delete=False) as f:
+                temp_filename = f.name
+                writer = csv.DictWriter(f, fieldnames=output_headers)
                 writer.writeheader()
                 for row in data.values():
                     # Ensure only defined headers are written
-                    filtered_row = {k: row.get(k, '') for k in headers}
+                    filtered_row = {k: row.get(k, '') for k in output_headers}
                     writer.writerow(filtered_row)
-            
+                f.flush()
+                os.fsync(f.fileno())
+
             # Atomic file replacement for resilience
             os.replace(temp_filename, filename)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] SUCCESS: Progress saved to {filename}.")
+            return True
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] CRITICAL: Failed to save progress to {filename}. {e}")
-            if os.path.exists(temp_filename):
-                os.remove(temp_filename)
             self.stop_script = True
+            self._checkpoint_write_failed = True
+            return False
+        finally:
+            if temp_filename and os.path.exists(temp_filename):
+                os.remove(temp_filename)
 
     # --- API and Cache Management ---
 
@@ -258,132 +282,199 @@ class PokemonCardDownloader:
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: Failed to create directory: {e}. Please try again.")
         return self.image_dir
 
-    def _download_card(self, card_key: Tuple[str, str], card_data: Dict[str, Any], root_dir: str) -> bool:
-        """
-        Attempts to download a single card image with retries.
-        Returns True on success, False on failure.
-        """
-        set_id, card_number = card_key
-        set_name = card_data['set_name']
-        url = card_data['image_url']
-        local_filename = card_data['filename']
-        
-        # Determine the save path: ROOT/set_name (set_id)/filename
-        save_folder = os.path.join(root_dir, f"{set_name}")
-        os.makedirs(save_folder, exist_ok=True) # Ensure set-specific subfolder exists
-        save_path = os.path.join(save_folder, local_filename)
+    @staticmethod
+    def _card_path(card_data: Dict[str, Any], root_dir: str) -> Path:
+        """Keep existing folder names, but reject ambiguous or escaping paths."""
+        root = Path(root_dir).resolve()
+        parts = [card_data.get('set_name'), card_data.get('filename')]
+        for part in parts:
+            if (not isinstance(part, str) or not part or part in ('.', '..')
+                    or part.endswith((' ', '.')) or PureWindowsPath(part).is_reserved()
+                    or any(ord(c) < 32 or c in '<>:"/\\|?*' for c in part)):
+                raise ValueError('Set name and filename must be single safe path components')
+        folder = root / parts[0]
+        candidate = folder / parts[1]
+        if folder.is_symlink() or candidate.is_symlink():
+            raise ValueError('Image paths must not use symbolic links')
+        candidate.resolve().relative_to(root)
+        return candidate
 
-        if os.path.exists(save_path) and card_data.get('status') == 'success':
-            # Skip already successful and existing files
-            return True
-
-        retries = 0
-        while retries < MAX_RETRIES + 1: # Loop MAX_RETRIES times for retries (and 1 for initial attempt)
-            if retries > 0:
-                 print(f"[{datetime.now().strftime('%H:%M:%S')}] WARNING: {set_id}/{card_number} failed. Retrying in 2s (Attempt {retries}/{MAX_RETRIES})...")
-                 time.sleep(2) # Implement a brief delay before retrying
-            
-            try:
-                start_time = time.time()
-                response = requests.get(url, stream=True, timeout=30)
-                response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
-
-                with open(save_path, 'wb') as file:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        file.write(chunk)
-                
-                # Success: Update card data
-                end_time = time.time()
-                card_data['status'] = 'success'
-                card_data['download_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                card_data['file_size'] = os.path.getsize(save_path)
-                card_data['download_duration'] = round(end_time - start_time, 4)
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] SUCCESS: {set_id}/{card_number} downloaded in {card_data['download_duration']}s.")
-                return True
-
-            except requests.exceptions.RequestException as e:
-                # Network or HTTP error
-                pass # Let the loop continue to retry
-
-            except Exception as e:
-                # Catch file I/O errors or other unforeseen exceptions
-                card_data['status'] = f'failed (Unknown Error)'
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] CRITICAL: Unhandled error for {set_id}/{card_number}. {e}")
+    @staticmethod
+    def _image_complete(path: Path, expected_size: Any = None) -> bool:
+        """Check PNG boundaries and an available recorded size, without decoding pixels."""
+        try:
+            size = path.stat().st_size
+            if size < 45:
                 return False
+            if expected_size not in (None, '', '0', 0) and size != int(expected_size):
+                return False
+            with path.open('rb') as stream:
+                if stream.read(8) != b'\x89PNG\r\n\x1a\n':
+                    return False
+                stream.seek(-12, os.SEEK_END)
+                return stream.read() == b'\x00\x00\x00\x00IEND\xaeB`\x82'
+        except (OSError, ValueError, TypeError):
+            return False
 
-            retries += 1 # Increment retry counter
+    def _download_card(self, card_key: Tuple[str, str], card_data: Dict[str, Any], root_dir: str) -> bool:
+        """Promote a completed image atomically, retaining the prior file on failure."""
+        if self.stop_script:
+            return False
+        try:
+            save_path = self._card_path(card_data, root_dir)
+            if self._image_complete(save_path, card_data.get('file_size')):
+                card_data.update(status='success', file_size=save_path.stat().st_size)
+                return True
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+        except (ValueError, TypeError, OSError) as error:
+            card_data['status'] = 'failed (Invalid image path)'
+            print(f'Cannot use image path for {card_key}: {error}')
+            return False
 
-        # Failure after max retries
-        card_data['status'] = f'failed (Max Retries {MAX_RETRIES})'
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: {set_id}/{card_number} failed after {MAX_RETRIES + 1} attempts. URL: {url}.")
-        return False # Should only be reached if all retries fail
-
-
-    def _process_downloads(self):
-        """Manages the parallel download process for all 'pending' cards."""
-        
-        # 1. Identify pending tasks (retry failed cards in the new run)
-        cards_to_download = [
-            (k, v) for k, v in self.downloaded_cards_data.items() 
-            if v['status'] in ('pending', 'N/A') or 'failed' in v['status']
-        ]
-
-        if not cards_to_download:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] INFO: No pending card downloads found. Collection up-to-date.")
-            return
-
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] START: Initiating parallel download for {len(cards_to_download)} cards with {MAX_WORKERS} workers.")
-        
-        failed_cards_in_run: Dict[Tuple[str, str], int] = {}
-        successful_downloads_count = 0
-        
-        # Use the guaranteed root directory
-        root_dir = self.image_dir
-
-        # 2. Execute parallel downloads
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_card = {
-                executor.submit(self._download_card, card_key, card_data, root_dir): card_key
-                for card_key, card_data in cards_to_download
-            }
-            
-            for future in as_completed(future_to_card):
+        for attempt in range(MAX_RETRIES + 1):
+            if self.stop_script:
+                return False
+            if attempt:
+                time.sleep(min(2 ** attempt, 30))
                 if self.stop_script:
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] CRITICAL: Script terminated by critical error. Shutting down executor.")
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-
-                card_key = future_to_card[future]
-                card_success = future.result()
-                
-                # Check for critical failure logic
-                if not card_success and f'Max Retries {MAX_RETRIES}' in self.downloaded_cards_data[card_key]['status']:
-                    set_id, card_number = card_key
-                    failed_cards_in_run[card_key] = failed_cards_in_run.get(card_key, 0) + 1
-                    
-                    if len(failed_cards_in_run) >= 100000000000000000000000: # Check unique card failures
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] FATAL: 3 or more unique cards ({list(failed_cards_in_run.keys())}) failed their maximum retries. Killing script and saving progress.")
+                    return False
+            temporary = None
+            try:
+                started = time.monotonic()
+                with requests.get(card_data['image_url'], stream=True, timeout=30) as response:
+                    if response.status_code == 429:
                         self.stop_script = True
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        break
-                elif card_success:
-                    successful_downloads_count += 1
-                
-                # Save progress after a batch (e.g., every 50 successful downloads)
-                if successful_downloads_count % 50 == 0 and successful_downloads_count > 0:
-                     self._save_csv_data(DOWNLOADED_CARDS_CSV, CARDS_HEADERS, self.downloaded_cards_data)
-        
-        # 3. Final save of cards CSV
-        self._save_csv_data(DOWNLOADED_CARDS_CSV, CARDS_HEADERS, self.downloaded_cards_data)
-        
-        # 4. Update Sets CSV (Checking for completeness)
-        self._update_sets_completion()
+                        card_data['status'] = 'failed (Rate limited; resume later)'
+                        return False
+                    response.raise_for_status()
+                    with tempfile.NamedTemporaryFile(mode='wb', dir=save_path.parent,
+                                                     prefix='.' + save_path.name + '.', suffix='.part',
+                                                     delete=False) as stream:
+                        temporary = Path(stream.name)
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if self.stop_script:
+                                return False
+                            stream.write(chunk)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    length = response.headers.get('Content-Length')
+                    if response.headers.get('Content-Encoding', 'identity') != 'identity':
+                        length = None
+                    if length is not None and temporary.stat().st_size != int(length):
+                        raise ValueError('Image length does not match the response')
+                    if not self._image_complete(temporary):
+                        raise ValueError('Incomplete PNG image response')
+                os.replace(temporary, save_path)
+                card_data.update(status='success', download_date=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                 file_size=save_path.stat().st_size,
+                                 download_duration=round(time.monotonic() - started, 4))
+                return True
+            except requests.exceptions.RequestException as error:
+                if error.response is not None and 400 <= error.response.status_code < 500:
+                    break
+            except (ValueError, OSError) as error:
+                card_data['status'] = 'failed (Image or file error)'
+                if isinstance(error, OSError):
+                    self.stop_script = True
+                print(f'Image was not replaced for {card_key}: {error}')
+                return False
+            finally:
+                if temporary is not None and temporary.exists():
+                    temporary.unlink()
+        card_data['status'] = f'failed (Max Retries {MAX_RETRIES})'
+        return False
 
+    def _process_downloads(self) -> bool:
+        """Bound outstanding work and save stable snapshots of completed results."""
+        if self.stop_script:
+            return False
+        root_dir = self.image_dir
+        # Check for conflicting destinations before any image writes begin.
+        destinations = {}
+        for key, row in self.downloaded_cards_data.items():
+            try:
+                destination = os.path.normcase(str(self._card_path(row, root_dir)))
+            except (ValueError, TypeError, OSError):
+                continue  # The worker reports invalid paths without requesting images.
+            if destination in destinations:
+                self.stop_script = True
+                raise CheckpointError(f'Conflicting image destinations for {destinations[destination]} and {key}')
+            destinations[destination] = key
+
+        def pending_cards():
+            for key, row in self.downloaded_cards_data.items():
+                if row.get('status') == 'success':
+                    try:
+                        if self._image_complete(self._card_path(row, root_dir), row.get('file_size')):
+                            continue
+                    except (ValueError, TypeError, OSError):
+                        pass
+                yield key, row
+
+        pending = iter(pending_cards())
+        inflight = {}
+        failed = set()
+        changed_since_save = 0
+        executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+
+        def accept(future, key, working):
+            nonlocal changed_since_save
+            if future.cancelled():
+                return
+            try:
+                successful = future.result()
+            except Exception:
+                working['status'] = 'failed (Unexpected worker error)'
+                successful = False
+                self.stop_script = True
+            if working != self.downloaded_cards_data[key]:
+                self.downloaded_cards_data[key].update(working)
+                changed_since_save += 1
+            if not successful:
+                failed.add(key)
+                if len(failed) >= MAX_FAILED_CARDS:
+                    self.stop_script = True
+
+        try:
+            while True:
+                while not self.stop_script and len(inflight) < MAX_WORKERS:
+                    try:
+                        key, row = next(pending)
+                    except StopIteration:
+                        break
+                    working = dict(row)  # Workers never mutate the checkpoint being saved.
+                    inflight[executor.submit(self._download_card, key, working, root_dir)] = (key, working)
+                if not inflight:
+                    break
+                done, _ = wait(inflight, return_when=FIRST_COMPLETED)
+                for future in done:
+                    key, working = inflight.pop(future)
+                    accept(future, key, working)
+                if changed_since_save >= CHECKPOINT_BATCH_SIZE and not self._checkpoint_write_failed:
+                    self._save_csv_data(DOWNLOADED_CARDS_CSV, CARDS_HEADERS, self.downloaded_cards_data)
+                    changed_since_save = 0
+                if self.stop_script:
+                    for future in inflight:
+                        future.cancel()
+        except BaseException:
+            self.stop_script = True
+            raise
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+            for future, (key, working) in inflight.items():
+                accept(future, key, working)
+            if changed_since_save and not self._checkpoint_write_failed:
+                self._save_csv_data(DOWNLOADED_CARDS_CSV, CARDS_HEADERS, self.downloaded_cards_data)
+            if not self._checkpoint_write_failed:
+                self._update_sets_completion()
+        if failed:
+            print(f'{len(failed)} cards could not finish. Progress was checkpointed where possible; resume later.')
+        return not failed and not self.stop_script
 
     def _update_sets_completion(self):
         """Checks if all cards in a set are 'success' and updates the set_complete status."""
         print(f"[{datetime.now().strftime('%H:%M:%S')}] INFO: Checking set completion status...")
-        set_counts: Dict[str, Tuple[int, int]] = {} # (downloaded_success_count, total_count)
+        set_counts: Dict[str, List[int]] = {} # [downloaded_success_count, total_count]
         updated_sets = 0
 
         # 1. Tally successful downloads per set
@@ -391,10 +482,19 @@ class PokemonCardDownloader:
             set_id = card_data['set_id']
             if set_id not in set_counts:
                 # Use the printed_total from the sets CSV for the current total
-                total = int(self.downloaded_sets_data.get(set_id, {}).get('printed_total', 0))
+                try:
+                    total = int(self.downloaded_sets_data.get(set_id, {}).get('printed_total', 0))
+                except (TypeError, ValueError):
+                    total = 0  # Unknown totals must not mark a set complete.
                 set_counts[set_id] = [0, total]
             
             if card_data.get('status') == 'success':
+                if self.image_dir:
+                    try:
+                        if not self._image_complete(self._card_path(card_data, self.image_dir), card_data.get('file_size')):
+                            continue
+                    except (ValueError, TypeError, OSError):
+                        continue
                 set_counts[set_id][0] += 1
         
         # 2. Update set records
@@ -408,7 +508,7 @@ class PokemonCardDownloader:
                     is_complete = False
 
                 # Update cards_downloaded count
-                if int(set_row['cards_downloaded']) != downloaded:
+                if str(set_row.get('cards_downloaded', '')) != str(downloaded):
                     set_row['cards_downloaded'] = downloaded
                     updated_sets += 1
 
@@ -433,6 +533,8 @@ class PokemonCardDownloader:
         """
         Executes the main download workflow.
         """
+        if self.stop_script:
+            return
         if not self._load_or_fetch_sets(force_update=force_api_fetch):
             return
 
@@ -448,12 +550,14 @@ class PokemonCardDownloader:
             return
         # ---------------------------------------------------------------------
         
-        self._process_downloads()
+        complete = self._process_downloads()
         
-        if not self.stop_script:
+        if complete:
             print("\n========================================================")
             print("All required download and synchronization tasks are complete.")
             print("========================================================\n")
+        elif not self.stop_script:
+            print("Some images could not be downloaded. Saved progress is available to resume.")
 
     def show_stats(self):
         """
@@ -522,8 +626,12 @@ class PokemonCardDownloader:
 
 def main():
     """Provides the command-line interface for the user and handles graceful shutdown."""
-    downloader = PokemonCardDownloader()
-    
+    try:
+        downloader = PokemonCardDownloader()
+    except CheckpointError as error:
+        print(f'Cannot start safely: {error}', file=sys.stderr)
+        return
+
     try:
         while True:
             print("\n--------------------------------------------------------")
@@ -557,22 +665,13 @@ def main():
             except Exception as e:
                 # Catch general script errors during execution
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] CRITICAL ERROR: An unexpected error occurred: {e}", file=sys.stderr)
-                # Ensure a critical error also tries to save before exiting
-                if not downloader.stop_script:
-                    downloader._save_csv_data(DOWNLOADED_CARDS_CSV, CARDS_HEADERS, downloader.downloaded_cards_data)
-                    downloader._update_sets_completion()
+                # The download coordinator checkpoints completed work in its finally block.
+                # Do not overwrite disk data after a failed read or an unrelated command error.
                 break
 
     except KeyboardInterrupt:
         # **CRITICAL FIX**: Handle Ctrl+C for graceful exit and progress save
-        print("\n\n[Ctrl+C Detected] WARNING: Interrupting active process. Saving current progress...")
-        
-        # Ensure data is saved before exit
-        downloader._save_csv_data(DOWNLOADED_CARDS_CSV, CARDS_HEADERS, downloader.downloaded_cards_data)
-        downloader._update_sets_completion()
-        
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] SUCCESS: Progress saved. Shutting down gracefully. 👋")
-        exit(0) 
+        print("\nInterrupted. Completed downloads were checkpointed where possible. Existing files remain available to resume.")
 
 if __name__ == "__main__":
     main()

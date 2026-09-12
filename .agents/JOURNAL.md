@@ -2,3 +2,7 @@
 
 - 2026-09-11: Reproduced lost existing-set metadata with restart checks; record updates to existing sets before deciding whether to save. Preserve download counts, completion flags, unlisted sets and card progress. Add isolated Linux/Windows checkpoint tests; no live downloads or storage migration.
 - 2026-09-11: Published PR #26 as f541bcd; twelve tests pass locally and on both hosted platforms, including main run 34534253252. Five main workflows passed and original CSV/JSON files are byte-preserved. This is a local CLI source release; no Supabase/Vercel deployment or hosting saving is claimed.
+
+2026-09-12 download recovery in progress: all 13 new offline cases expose failures in the baseline, including partial/duplicate checkpoint reads, lost extra columns, direct/truncated image writes, path traversal, unbounded queue/failure budgets, repeated saves, missing-file resume and unclosed/rate-limited responses. Fixes preserve original files, bound outstanding work and merge completed worker copies before checkpoint saves. Source remains under validation; no collection data or live provider was used.
+
+- 2026-09-12: Download recovery validation passes 37 Windows cases with one symlink capability skip; require all 38 on hosted Linux. Retain bounded in-flight requests, three-failure stop, explicit 429 pause, stable worker snapshots, atomic image/checkpoint recovery, legacy metadata and unknown CSV columns. No provider requests, workflow changes or storage migration. Hosted release verification is pending.
