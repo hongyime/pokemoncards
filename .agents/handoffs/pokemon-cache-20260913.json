@@ -1,0 +1,50 @@
+{
+  "at": "2026-09-13T00:08:21.417660+00:00",
+  "base_head": "e0332a148476375b79ef8f0b352509682fb32021",
+  "tasks": [
+    {
+      "id": "map_cache_launcher_and_process_contracts",
+      "done": true
+    },
+    {
+      "id": "reproduce_cache_loss_and_overlapping_processes",
+      "done": true
+    },
+    {
+      "id": "implement_atomic_cache_and_exclusive_cli",
+      "done": true
+    },
+    {
+      "id": "validate_windows_linux_and_release",
+      "done": false
+    },
+    {
+      "id": "verify_preservation_and_publish_report",
+      "done": false
+    }
+  ],
+  "portfolio_complete": false,
+  "stage": "local_checks_passed_hosted_pending",
+  "contracts": [
+    "Valid replacement cache becomes visible atomically; serialization, sync or replacement failure preserves the prior file.",
+    "Malformed cached or provider metadata must not become a partial in-memory catalogue or destroy the last good file.",
+    "One cooperating CLI per collection directory holds an operating-system lock before checkpoint reads until exit.",
+    "Windows launcher keeps stdin interactive and installs only the repository requirements."
+  ],
+  "limits": "Local CLI source release; existing records are not accessed or migrated by fixtures. Catalog completeness and Supabase migration remain separate.",
+  "updated_at": "2026-09-13T00:18:16.675866+00:00",
+  "baseline": {
+    "cache_tests": 7,
+    "cache_assertion_failures": 12,
+    "process_tests": 4,
+    "process_failures": 2
+  },
+  "local_validation": {
+    "tests": 57,
+    "passed": 55,
+    "skipped": 2,
+    "skip_reason": "Windows host lacks symbolic-link creation; hosted Linux and Windows must cover supported cases.",
+    "fatal_ruff": "passed",
+    "bandit_findings": 0
+  }
+}
