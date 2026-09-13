@@ -30,6 +30,10 @@ show statistics, or exit. Download options contact the image provider and write
 files. Statistics also load set metadata and may contact the API if the cache
 is unavailable.
 
+On Windows, `run_scraper.bat` opens that same interactive menu, including later
+directory prompts, and returns Python's exit status. `set_up.bat` installs the
+versions in `requirements.txt` through that same Python interpreter.
+
 `sets_cache.json`, `downloaded_sets.csv` and `downloaded_cards.csv` are read and
 written relative to the current directory. Images use the directory selected
 in the prompt. Keep existing files when resuming a collection.
@@ -44,6 +48,14 @@ Checkpoint reads fail closed on malformed rows, missing or duplicate columns,
 duplicate record keys and invalid encoding. Repair or restore the original file
 before resuming; the utility does not replace it with partially read records.
 Additional CSV columns are retained when progress is saved.
+
+Set-cache refreshes validate IDs, names, duplicate IDs and numeric totals before
+writing a complete temporary JSON file, syncing it and replacing the old cache.
+Serialization, sync and replacement failures preserve the previous cache and
+in-memory catalogue. Extra response fields are retained. An unreadable or invalid
+existing cache stops the ordinary cached operation without an automatic fetch;
+repair it or choose the explicit set-list refresh option. This validates metadata
+shape, not upstream catalogue completeness or every response field's semantics.
 
 Downloads write to a temporary file and replace the destination only after a
 successful response, a PNG boundary check and any available response-size check.
@@ -68,8 +80,13 @@ not claim the collection is complete.
 Set names and filenames must be single safe path components. Escaping paths,
 symbolic links and conflicting destinations are rejected. Existing folder names
 are kept; repair an invalid manifest explicitly instead of silently renaming its
-downloads. Use one downloader process per collection directory: checkpoints do
-not coordinate simultaneous independent processes.
+downloads. The CLI holds an operating-system lock before reading checkpoints and
+until it exits, so a second CLI in the same collection directory stops immediately
+with exit code 2. The OS releases ownership after a crash; the empty
+`.pokemoncards.lock` file remains and must not be removed while a process is active.
+This coordinates cooperating local CLI processes. Direct class users must acquire
+`collection_lock` themselves. Different collections that share one image directory,
+external editors and network-filesystem locking are not coordinated by this guard.
 
 ## Tests
 
@@ -78,10 +95,11 @@ python -m unittest discover -s tests -v
 ```
 
 The tests use synthetic files in temporary directories and block HTTP requests.
-They cover metadata persistence, strict checkpoint loading, atomic image recovery,
-bounded failures, rate limits, stable concurrent snapshots and interruptions.
-CI runs all 38 cases on Linux and Windows; Windows may skip the symbolic-link case
-when the host does not grant that capability. Tests use fake image responses and
+They cover metadata persistence, strict checkpoint loading, atomic image/cache
+recovery, bounded failures, rate limits, stable snapshots, interrupted saves,
+independent CLI processes and Windows launch/setup input. CI runs 57 cases on Linux
+and Windows; the two batch cases run only on Windows, and symbolic-link cases may
+skip when the host does not grant that capability. Tests use fake image responses and
 do not start a provider download or read the repository's collection files.
 
 This remains a local CLI with CSV/JSON checkpoints and image files. No Supabase

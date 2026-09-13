@@ -61,3 +61,6 @@ skills/
 skills-lock.json
 docs/
 # End AI / editor dot directories (managed via sourcerepo)
+
+# Persistent OS lock; its presence does not mean a downloader is running.
+.pokemoncards.lock

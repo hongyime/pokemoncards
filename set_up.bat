@@ -7,8 +7,8 @@ echo         Installing Required Libraries
 echo ========================================================
 echo.
 
-REM Check if pip is available
-pip --version >nul 2>&1
+REM Use pip from the same interpreter that launches the downloader.
+call python -m pip --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo Error: pip is not recognized. Please ensure Python is installed and added to PATH.
     pause
@@ -16,7 +16,7 @@ if %errorlevel% neq 0 (
 )
 
 echo Installing dependencies...
-pip install requests
+call python -m pip install -r "%~dp0requirements.txt"
 
 if %errorlevel% neq 0 (
     echo.

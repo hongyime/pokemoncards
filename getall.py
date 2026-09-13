@@ -9,6 +9,7 @@ from pathlib import Path, PureWindowsPath
 import tempfile
 from typing import List, Dict, Any, Optional, Tuple
 import sys
+from collection_lock import CollectionBusyError, collection_lock
 
 # --- Configuration ---
 API_BASE_URL = "https://api.pokemontcg.io/v2"
@@ -119,19 +120,54 @@ class PokemonCardDownloader:
 
     # --- API and Cache Management ---
 
+    @staticmethod
+    def _validated_sets(data: Any) -> List[Dict[str, Any]]:
+        """Reject malformed/ambiguous metadata before replacing the cache."""
+        if not isinstance(data, dict) or not isinstance(data.get('data'), list) or not data['data']:
+            raise ValueError('Expected a nonempty set catalogue')
+        seen = set()
+        for row in data['data']:
+            if not isinstance(row, dict) or any(not isinstance(row.get(key), str) or not row[key].strip()
+                                                for key in ('id', 'name')):
+                raise ValueError('Every set must have an ID and name')
+            if row['id'] in seen:
+                raise ValueError('Duplicate set ID')
+            seen.add(row['id'])
+            for key in ('printedTotal', 'total'):
+                if key in row and (type(row[key]) is not int or row[key] < 0):
+                    raise ValueError('Invalid set total')
+        return data['data']
+
+    def _save_sets_cache(self, data: Dict[str, Any]) -> None:
+        """Publish one complete cache; failed writes preserve the prior file."""
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                                             dir=os.path.dirname(os.path.abspath(SETS_CACHE_FILE)),
+                                             prefix='.' + os.path.basename(SETS_CACHE_FILE) + '.',
+                                             suffix='.tmp', delete=False) as stream:
+                temporary = stream.name
+                json.dump(data, stream, indent=4, allow_nan=False)
+                stream.write('\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, SETS_CACHE_FILE)
+        finally:
+            # Only this invocation's unpublished temporary file is removed.
+            if temporary and os.path.exists(temporary):
+                os.remove(temporary)
+
     def _fetch_all_sets_from_api(self) -> Optional[List[Dict[str, Any]]]:
         """Fetches all sets from the API and updates the local cache."""
         print(f"[{datetime.now().strftime('%H:%M:%S')}] INFO: Requesting all set data from API...")
+        response = None
         try:
             response = requests.get(SETS_ENDPOINT, timeout=30)
             response.raise_for_status()
             data = response.json()
             
-            sets = data.get('data', [])
-            
-            # Save the raw response to JSON cache file
-            with open(SETS_CACHE_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4)
+            sets = self._validated_sets(data)
+            self._save_sets_cache(data)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] SUCCESS: Downloaded {len(sets)} sets and saved to {SETS_CACHE_FILE}.")
             return sets
         except requests.exceptions.RequestException as e:
@@ -140,6 +176,9 @@ class PokemonCardDownloader:
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] CRITICAL: Failed to save JSON cache. {e}")
             return None
+        finally:
+            if response is not None:
+                response.close()
 
     def _load_or_fetch_sets(self, force_update: bool = False) -> bool:
         """Loads sets from cache or fetches from API if needed/forced."""
@@ -149,11 +188,11 @@ class PokemonCardDownloader:
             try:
                 with open(SETS_CACHE_FILE, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    sets = data.get('data', [])
+                    sets = self._validated_sets(data)
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] SUCCESS: Loaded {len(sets)} sets from cache.")
             except Exception as e:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] WARNING: Failed to read {SETS_CACHE_FILE}. Forcing API fetch. {e}")
-                sets = self._fetch_all_sets_from_api()
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] WARNING: Cannot safely read {SETS_CACHE_FILE}; original preserved. Repair it or explicitly refresh the set list. {e}")
+                return False
         else:
             sets = self._fetch_all_sets_from_api()
 
@@ -624,13 +663,13 @@ class PokemonCardDownloader:
 
 # --- Main Application Execution ---
 
-def main():
+def _run_menu():
     """Provides the command-line interface for the user and handles graceful shutdown."""
     try:
         downloader = PokemonCardDownloader()
     except CheckpointError as error:
         print(f'Cannot start safely: {error}', file=sys.stderr)
-        return
+        return 1
 
     try:
         while True:
@@ -654,24 +693,41 @@ def main():
                     downloader.show_stats()
                 elif choice == '4':
                     print("Exiting utility. Goodbye! 👋")
-                    break
+                    return 0
                 else:
                     print("Invalid choice. Please select 1, 2, 3, or 4.")
                 
                 if downloader.stop_script:
                     print("The utility terminated prematurely due to a critical error or repeated card failure.")
-                    break
+                    return 1
 
             except Exception as e:
                 # Catch general script errors during execution
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] CRITICAL ERROR: An unexpected error occurred: {e}", file=sys.stderr)
                 # The download coordinator checkpoints completed work in its finally block.
                 # Do not overwrite disk data after a failed read or an unrelated command error.
-                break
+                return 1
 
     except KeyboardInterrupt:
         # **CRITICAL FIX**: Handle Ctrl+C for graceful exit and progress save
         print("\nInterrupted. Completed downloads were checkpointed where possible. Existing files remain available to resume.")
+        return 130
+    except EOFError:
+        print("\nInput closed. Exiting utility.")
+        return 0
+
+
+def main():
+    """Lock before reading any checkpoint and retain ownership until menu exit."""
+    try:
+        with collection_lock(Path.cwd()):
+            return _run_menu()
+    except CollectionBusyError:
+        print('This collection directory is already in use by another downloader. Close it before starting again.', file=sys.stderr)
+        return 2
+    except OSError as error:
+        print(f'Cannot safely lock the collection directory: {error}', file=sys.stderr)
+        return 2
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

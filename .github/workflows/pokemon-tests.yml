@@ -3,9 +3,9 @@ name: Pokemon checkpoint tests
 on:
   push:
     branches: [main]
-    paths: ['getall.py', 'tests/**', 'requirements.txt', '.github/workflows/pokemon-tests.yml']
+    paths: ['getall.py', 'collection_lock.py', '*.bat', 'tests/**', 'requirements.txt', '.github/workflows/pokemon-tests.yml']
   pull_request:
-    paths: ['getall.py', 'tests/**', 'requirements.txt', '.github/workflows/pokemon-tests.yml']
+    paths: ['getall.py', 'collection_lock.py', '*.bat', 'tests/**', 'requirements.txt', '.github/workflows/pokemon-tests.yml']
   workflow_dispatch:
 
 permissions:
