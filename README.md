@@ -34,6 +34,12 @@ On Windows, `run_scraper.bat` opens that same interactive menu, including later
 directory prompts, and returns Python's exit status. `set_up.bat` installs the
 versions in `requirements.txt` through that same Python interpreter.
 
+On Linux, after activating the virtual environment, use `sh set_up.sh` for
+dependency installation and `sh run_scraper.sh` for the same interactive menu.
+Both shell commands resolve the repository directory themselves, forward
+arguments and preserve the interpreter's exit status. Set `PYTHON=/path/to/python`
+to select a different interpreter. Run setup again only when dependencies change.
+
 `sets_cache.json`, `downloaded_sets.csv` and `downloaded_cards.csv` are read and
 written relative to the current directory. Images use the directory selected
 in the prompt. Keep existing files when resuming a collection.

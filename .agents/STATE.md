@@ -37,3 +37,7 @@ review. The wider portfolio and Supabase capacity/migration work remain open.
 2026-09-13 cache/CLI fixes pass locally: temporary JSON writes plus fsync/replacement preserve the last good cache on serialization, interruption, sync or sharing failure; malformed cached/provider metadata is rejected before replacement. One OS lock is held before CLI checkpoint reads through exit and releases on crashes without deleting its lock file. The Windows launcher retains interactive stdin and Python exit status; setup uses the pinned requirements with the same interpreter. All 57 local cases run: 55 pass and two symbolic-link cases are host-capability skips; Ruff fatal checks pass and Bandit reports zero findings. Hosted Linux/Windows and source release verification remain pending. Original tracked collection files are unchanged and no provider downloads occurred.
 
 2026-09-16 baseline review: no new work required. Repo synced to origin/main dcc183b. Open PR list: Dependabot #25 only. No secrets, no build/lint drift discovered in a read-only pass. Tests not executed locally (pytest harness stall on Windows) — hosted CI remains the source of truth.
+
+## Reviewed workspace maintenance - 2026-09-27
+
+Publish the reviewed portability and privacy maintenance from the current default branch, preserving concurrent upstream work and original workspace changes. Validation is limited to the documented offline fixtures and hosted checks; no live data job or deployment command was executed locally.
