@@ -1,3 +1,7 @@
+## Portability maintenance - 2026-09-27
+
+- Added Linux setup/run entry points and offline launcher contracts; Windows scripts retained. New Linux contracts passed. The existing Windows suite had one concurrency assertion failure that passed on targeted rerun; full application health is not claimed.
+
 # Agent State
 
 Portfolio maintenance, 2026-09-12: download recovery repair is ready for hosted
