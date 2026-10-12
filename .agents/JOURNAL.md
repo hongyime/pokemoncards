@@ -14,3 +14,4 @@
 - 2026-09-16 baseline review: repo up to date after pulling dcc183b (auto-merge workflow refresh). Working tree clean. Only open PR is Dependabot #25 (setup-python 6→7); prior maintenance items (cache/coordination #29, LFS #28, download recovery) are merged. requests==2.34.2 remains the sole runtime dependency. No production secrets in tree. Local test run skipped (pytest hung under Windows harness); hosted CI is authoritative. No code changes this session — status recorded only.
 
 - 2026-09-27: Added Linux setup/run entry points and offline launcher contracts; Windows scripts retained. New Linux contracts passed. The existing Windows suite had one concurrency assertion failure that passed on targeted rerun; full application health is not claimed.
+- 2026-09-27: Prepared reviewed portability/privacy changes on the current default branch with maintenance-only file selection and preserved original workspace state.
